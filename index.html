@@ -1796,22 +1796,16 @@ const companyDefaults = {
 };
 
 // ============================================================
+// SUPABASE SYNC SYSTEM
+// Data tersimpan di Supabase, sinkron real-time ke semua perangkat
 // ============================================================
-// JSONBIN SYNC SYSTEM — FIXED & WORKING
-// Data tersimpan di cloud JSONbin, sinkron ke semua perangkat
-// ============================================================
-const JSONBIN_API_KEY = '$2a$10$HD/GAgQaPvSWiZwmV25e4OhKw.PnnbdNYtAPDKMK0a83QWO2AoyOK';
-const JSONBIN_BASE = 'https://api.jsonbin.io/v3';
-
-// Bin IDs disimpan di localStorage agar semua browser pakai bin yang sama
-// Saat pertama kali dibuka, bin dibuat otomatis lalu ID-nya dibagikan via URL hash
-const BIN_KEY = 'ds_cloud_bins';
-
-let _bins = {}; // { products: 'ID', testimonials: 'ID', company: 'ID', orders: 'ID' }
-let _cloudReady = false;
+const SUPA_URL = 'https://kcrwlkolmkoehvjtvpub.supabase.co';
+const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtjcndsa29sbWtvZWh2anR2cHViIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzMDYwMTcsImV4cCI6MjA5Njg4MjAxN30.BFZlvL2Dh-BlURTt6cDlDD4_eG0hYrU-5K1mW3V-cv4';
+const SUPA_TABLE = 'sitedata';
 let _saveTimers = {};
+let _cloudReady = false;
 
-// ---- Notifikasi sync ----
+// Notifikasi sync
 function showSyncStatus(msg, color) {
   let el = document.getElementById('syncStatus');
   if (!el) {
@@ -1827,181 +1821,90 @@ function showSyncStatus(msg, color) {
   el._t = setTimeout(() => { el.style.opacity = '0'; }, 4000);
 }
 
-// ---- Buat satu bin baru ----
-async function _createOneBin(name, initData) {
-  const res = await fetch(JSONBIN_BASE + '/b', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Master-Key': JSONBIN_API_KEY,
-      'X-Bin-Name': 'ds-' + name,
-      'X-Bin-Private': 'true'
-    },
-    body: JSON.stringify(initData)
-  });
-  if (!res.ok) throw new Error('createBin ' + name + ' failed: ' + res.status);
-  const j = await res.json();
-  return j.metadata.id;
+// Headers Supabase
+function _supaHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    'apikey': SUPA_KEY,
+    'Authorization': 'Bearer ' + SUPA_KEY
+  };
 }
 
-// ---- Baca isi bin ----
-async function _readBin(binId) {
-  const res = await fetch(JSONBIN_BASE + '/b/' + binId + '/latest', {
-    headers: { 'X-Master-Key': JSONBIN_API_KEY }
-  });
-  if (!res.ok) return null;
-  const j = await res.json();
-  return j.record;
-}
-
-// ---- Update isi bin ----
-async function _updateBin(binId, data) {
-  const res = await fetch(JSONBIN_BASE + '/b/' + binId, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Master-Key': JSONBIN_API_KEY
-    },
-    body: JSON.stringify(data)
-  });
-  return res.ok;
-}
-
-// ---- Simpan bin IDs ke localStorage ----
-function _saveBinIds() {
-  try { localStorage.setItem(BIN_KEY, JSON.stringify(_bins)); } catch(e) {}
-}
-
-// ---- Load bin IDs dari localStorage ----
-function _loadBinIds() {
+// Baca data dari Supabase
+async function _supaRead(key) {
   try {
-    const s = localStorage.getItem(BIN_KEY);
-    if (s) { _bins = JSON.parse(s); return true; }
-  } catch(e) {}
-  return false;
-}
-
-// ---- Verifikasi bin masih valid ----
-async function _verifyBins() {
-  for (const k of Object.keys(_bins)) {
-    const r = await _readBin(_bins[k]);
-    if (r === null) return false; // bin tidak valid
-  }
-  return true;
-}
-
-// ---- SETUP UTAMA — dipanggil saat halaman load ----
-async function loadDirectory() {
-  const hasSaved = _loadBinIds();
-  const allKeys = ['products','testimonials','company','realOrders'];
-  const hasAll = allKeys.every(k => _bins[k]);
-
-  if (hasSaved && hasAll) {
-    // Verifikasi bin masih ada
-    const valid = await _verifyBins();
-    if (valid) {
-      _cloudReady = true;
-      showSyncStatus('☁️ Terhubung ke cloud!', '#1a7a3a');
-      return;
-    }
-    // Bin tidak valid, buat ulang
-    _bins = {};
-  }
-
-  // Buat semua bin baru
-  showSyncStatus('⚙️ Setup database (sekali saja)...', '#1D4ED8');
-  try {
-    const initData = {
-      products: defaultProducts,
-      testimonials: defaultTestimonials,
-      company: companyDefaults,
-      realOrders: []
-    };
-    for (const k of allKeys) {
-      if (!_bins[k]) {
-        _bins[k] = await _createOneBin(k, initData[k]);
-      }
-    }
-    _saveBinIds();
-    _cloudReady = true;
-    showSyncStatus('✅ Database siap! Sinkron ke semua perangkat', '#1a7a3a');
-  } catch(e) {
-    showSyncStatus('⚠️ Gagal setup: ' + e.message, '#c0392b');
-    console.error('loadDirectory error:', e);
-  }
-}
-
-async function saveDirectory() { _saveBinIds(); }
-
-async function createBin(key, data) {
-  if (_bins[key]) return _bins[key];
-  _bins[key] = await _createOneBin(key, data);
-  _saveBinIds();
-  return _bins[key];
-}
-
-async function updateBin(binId, data) { return await _updateBin(binId, data); }
-async function readBin(binId) { return await _readBin(binId); }
-
-// ---- cloudSave: simpan ke cloud dengan debounce ----
-async function cloudSave(key, val) {
-  if (key === 'heroImage' || key === 'aboutImg_main' || key === 'aboutImg_accent') return;
-  if (!_cloudReady) { showSyncStatus('⏳ Menunggu koneksi cloud...', '#E67E22'); return; }
-  
-  // Strip gambar dari products sebelum simpan (terlalu besar)
-  let saveVal = val;
-  if (key === 'products' && Array.isArray(val)) {
-    saveVal = val.map(p => { const c = {...p}; delete c.img; return c; });
-  }
-  
-  const binId = _bins[key];
-  if (!binId) { showSyncStatus('⚠️ Bin ' + key + ' tidak ditemukan', '#c0392b'); return; }
-  
-  showSyncStatus('💾 Menyimpan ke cloud...', '#E67E22');
-  const ok = await _updateBin(binId, saveVal);
-  if (ok) {
-    showSyncStatus('✅ Tersimpan! Sinkron ke semua perangkat', '#1a7a3a');
-  } else {
-    showSyncStatus('⚠️ Gagal simpan, coba lagi', '#c0392b');
-  }
-}
-
-// ---- cloudLoad: baca dari cloud ----
-async function cloudLoad(key) {
-  if (!_cloudReady && !_bins[key]) return null;
-  const binId = _bins[key];
-  if (!binId) return null;
-  try {
-    const record = await _readBin(binId);
-    if (!record) return null;
-    // Products: merge dengan gambar dari localStorage
-    if (key === 'products' && Array.isArray(record)) {
-      try {
-        const localStr = localStorage.getItem('ds_products');
-        const local = localStr ? JSON.parse(localStr) : [];
-        return record.map(cp => {
-          const lp = Array.isArray(local) ? local.find(x => x.id === cp.id) : null;
-          return { ...cp, img: (lp && lp.img) ? lp.img : (cp.img || '') };
-        });
-      } catch(e) { return record; }
-    }
-    return record;
+    const res = await fetch(SUPA_URL + '/rest/v1/' + SUPA_TABLE + '?key=eq.' + key + '&select=value', {
+      headers: _supaHeaders()
+    });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    if (!rows || rows.length === 0) return null;
+    return JSON.parse(rows[0].value);
   } catch(e) { return null; }
 }
 
-// ---- loadData: localStorage dulu (cepat), refresh dari cloud di background ----
+// Simpan data ke Supabase (upsert)
+async function _supaWrite(key, val) {
+  try {
+    const res = await fetch(SUPA_URL + '/rest/v1/' + SUPA_TABLE, {
+      method: 'POST',
+      headers: {
+        ..._supaHeaders(),
+        'Prefer': 'resolution=merge-duplicates'
+      },
+      body: JSON.stringify({ key: key, value: JSON.stringify(val), updated_at: new Date().toISOString() })
+    });
+    return res.ok || res.status === 201;
+  } catch(e) { return false; }
+}
+
+// saveData: simpan ke localStorage (cepat) + Supabase (cloud)
+function saveData(key, val) {
+  try { localStorage.setItem('ds_' + key, JSON.stringify(val)); } catch(e) {}
+  clearTimeout(_saveTimers[key]);
+  showSyncStatus('💾 Menyimpan...', '#E67E22');
+  _saveTimers[key] = setTimeout(async () => {
+    // Products: hapus gambar base64 besar sebelum kirim ke cloud
+    let saveVal = val;
+    if (key === 'products' && Array.isArray(val)) {
+      saveVal = val.map(p => {
+        const c = {...p};
+        if (c.img && c.img.startsWith('data:')) delete c.img;
+        return c;
+      });
+    }
+    // Gambar base64 tidak disimpan ke cloud (terlalu besar)
+    if (key === 'heroImage' || key === 'aboutImg_main' || key === 'aboutImg_accent') {
+      if (typeof val === 'string' && val.startsWith('data:')) return;
+    }
+    const ok = await _supaWrite(key, saveVal);
+    if (ok) showSyncStatus('✅ Tersimpan! Sinkron ke semua perangkat', '#1a7a3a');
+    else showSyncStatus('⚠️ Gagal simpan ke cloud', '#c0392b');
+  }, 800);
+}
+
+// loadData: ambil dari localStorage dulu, lalu refresh dari cloud
 function loadData(key, def) {
   try {
     const d = localStorage.getItem('ds_' + key);
     const local = d ? JSON.parse(d) : def;
-    // Background refresh dari cloud
-    cloudLoad(key).then(cloudData => {
-      if (!cloudData) return;
-      const localJson = JSON.stringify(local);
-      const cloudJson = JSON.stringify(cloudData);
-      if (cloudJson === localJson) return; // tidak ada perubahan
-      // Ada perubahan dari perangkat lain — update UI
+    // Refresh dari cloud di background
+    _supaRead(key).then(cloudData => {
+      if (cloudData === null) return;
+      // Untuk products: gabungkan URL cloud dengan gambar lokal
+      if (key === 'products' && Array.isArray(cloudData)) {
+        const localStr = localStorage.getItem('ds_products');
+        const localProds = localStr ? JSON.parse(localStr) : [];
+        cloudData = cloudData.map(cp => {
+          const lp = Array.isArray(localProds) ? localProds.find(x => x.id === cp.id) : null;
+          if (lp && lp.img && !cp.img) cp.img = lp.img;
+          return cp;
+        });
+      }
+      const same = JSON.stringify(cloudData) === JSON.stringify(local);
+      if (same) return;
       try { localStorage.setItem('ds_' + key, JSON.stringify(cloudData)); } catch(e) {}
+      // Update UI
       if (key === 'products') {
         products = cloudData; renderProducts();
         if (typeof populateOrderSelects === 'function') populateOrderSelects();
@@ -2019,22 +1922,14 @@ function loadData(key, def) {
   } catch(e) { return def; }
 }
 
-// ---- saveData: simpan localStorage + cloud (debounce 600ms) ----
-function saveData(key, val) {
-  try { localStorage.setItem('ds_' + key, JSON.stringify(val)); } catch(e) {}
-  clearTimeout(_saveTimers[key]);
-  showSyncStatus('💾 Menyimpan...', '#E67E22');
-  _saveTimers[key] = setTimeout(() => { cloudSave(key, val); }, 600);
-}
-
-// ---- loadRealOrders: dari localStorage + refresh cloud ----
+// loadRealOrders
 function loadRealOrders() {
   try {
     const d = localStorage.getItem('ds_realOrders');
     const local = d ? JSON.parse(d).map(o => ({ phone:'', email:'', note:'', ...o })) : [];
-    cloudLoad('realOrders').then(cloudData => {
-      if (!cloudData) return;
-      const cloudArr = Array.isArray(cloudData) ? cloudData.map(o => ({ phone:'', email:'', note:'', ...o })) : [];
+    _supaRead('realOrders').then(cloudData => {
+      if (!cloudData || !Array.isArray(cloudData)) return;
+      const cloudArr = cloudData.map(o => ({ phone:'', email:'', note:'', ...o }));
       if (JSON.stringify(cloudArr) === JSON.stringify(local)) return;
       try { localStorage.setItem('ds_realOrders', JSON.stringify(cloudArr)); } catch(e) {}
       orders = cloudArr;
@@ -2042,61 +1937,111 @@ function loadRealOrders() {
       if (typeof updateOverviewStats === 'function') updateOverviewStats();
       showSyncStatus('🔄 Pesanan diperbarui dari cloud', '#1D4ED8');
     }).catch(() => {});
+    // Fallback lama
+    if (!d) {
+      const old = localStorage.getItem('ds_orders');
+      if (old) {
+        const arr = JSON.parse(old);
+        const isDemo = arr.length <= 8 && arr[0] && arr[0].name === 'Pak Budi';
+        if (!isDemo) {
+          const migrated = arr.map(o => ({ phone:'', email:'', note:'', ...o }));
+          localStorage.setItem('ds_realOrders', JSON.stringify(migrated));
+          return migrated;
+        }
+      }
+      return [];
+    }
     return local;
   } catch(e) { return []; }
 }
 
-// ---- saveRealOrders: simpan localStorage + cloud ----
+// saveRealOrders
 function saveRealOrders(arr) {
   try { localStorage.setItem('ds_realOrders', JSON.stringify(arr)); } catch(e) {}
   clearTimeout(_saveTimers['realOrders']);
   showSyncStatus('💾 Menyimpan pesanan...', '#E67E22');
-  _saveTimers['realOrders'] = setTimeout(() => { cloudSave('realOrders', arr); }, 600);
+  _saveTimers['realOrders'] = setTimeout(async () => {
+    const ok = await _supaWrite('realOrders', arr);
+    if (ok) showSyncStatus('✅ Pesanan tersimpan ke cloud', '#1a7a3a');
+    else showSyncStatus('⚠️ Gagal simpan pesanan', '#c0392b');
+  }, 800);
 }
 
-// ---- initialCloudSetup: dipanggil saat website pertama kali load ----
+// initialCloudSetup: dipanggil saat admin login
 async function initialCloudSetup() {
-  await loadDirectory();
-  if (!_cloudReady) return;
-  // Load semua data terbaru dari cloud
+  showSyncStatus('☁️ Menghubungkan ke Supabase...', '#1D4ED8');
   try {
-    const [cProds, cTestis, cCompany, cOrders] = await Promise.all([
-      cloudLoad('products'),
-      cloudLoad('testimonials'),
-      cloudLoad('company'),
-      cloudLoad('realOrders')
-    ]);
-    let updated = false;
-    if (cProds) {
-      products = cProds;
-      try { localStorage.setItem('ds_products', JSON.stringify(cProds)); } catch(e) {}
-      renderProducts();
-      if (typeof populateOrderSelects === 'function') populateOrderSelects();
-      updated = true;
+    // Test koneksi
+    const res = await fetch(SUPA_URL + '/rest/v1/' + SUPA_TABLE + '?limit=1', {
+      headers: _supaHeaders()
+    });
+    if (res.ok) {
+      _cloudReady = true;
+      // Upload semua data lokal ke cloud jika belum ada
+      const keys = ['products','testimonials','company','realOrders'];
+      for (const k of keys) {
+        const cloud = await _supaRead(k);
+        if (cloud === null) {
+          // Belum ada di cloud, upload sekarang
+          let val;
+          if (k === 'products') val = products.map(p => { const c={...p}; if(c.img&&c.img.startsWith('data:')) delete c.img; return c; });
+          else if (k === 'testimonials') val = testimonials;
+          else if (k === 'company') val = company;
+          else if (k === 'realOrders') val = orders;
+          await _supaWrite(k, val);
+          await new Promise(r => setTimeout(r, 300));
+        }
+      }
+      showSyncStatus('✅ Terhubung! Sinkron ke semua perangkat', '#1a7a3a');
+    } else {
+      showSyncStatus('⚠️ Gagal hubungi Supabase: ' + res.status, '#c0392b');
     }
-    if (cTestis) {
-      testimonials = cTestis;
-      try { localStorage.setItem('ds_testimonials', JSON.stringify(cTestis)); } catch(e) {}
-      renderTestimonials(); updated = true;
-    }
-    if (cCompany) {
-      company = cCompany;
-      try { localStorage.setItem('ds_company', JSON.stringify(cCompany)); } catch(e) {}
-      if (typeof applyLang === 'function') applyLang();
-      updated = true;
-    }
-    if (cOrders && Array.isArray(cOrders)) {
-      orders = cOrders.map(o => ({ phone:'', email:'', note:'', ...o }));
-      try { localStorage.setItem('ds_realOrders', JSON.stringify(orders)); } catch(e) {}
-      if (typeof renderOrders === 'function') renderOrders();
-      if (typeof updateOverviewStats === 'function') updateOverviewStats();
-    }
-    if (updated) showSyncStatus('✅ Semua data sinkron dari cloud', '#1a7a3a');
   } catch(e) {
-    showSyncStatus('⚠️ Gagal sinkron: ' + e.message, '#c0392b');
+    showSyncStatus('⚠️ Error: ' + e.message, '#c0392b');
   }
 }
 
+// Auto-refresh dari cloud setiap 15 detik (untuk perangkat yang sedang buka website)
+setInterval(async () => {
+  try {
+    const cp = await _supaRead('products');
+    if (cp) {
+      const localStr = localStorage.getItem('ds_products');
+      const local = localStr ? JSON.parse(localStr) : null;
+      if (JSON.stringify(cp) !== JSON.stringify(local)) {
+        // Merge dengan gambar lokal
+        const merged = cp.map(p => {
+          const lp = Array.isArray(local) ? local.find(x=>x.id===p.id) : null;
+          if (lp && lp.img && !p.img) p.img = lp.img;
+          return p;
+        });
+        products = merged;
+        localStorage.setItem('ds_products', JSON.stringify(merged));
+        renderProducts();
+        if(typeof populateOrderSelects==='function') populateOrderSelects();
+        showSyncStatus('🔄 Produk diperbarui dari cloud', '#1D4ED8');
+      }
+    }
+    const ct = await _supaRead('testimonials');
+    if (ct) {
+      const localStr = localStorage.getItem('ds_testimonials');
+      if (JSON.stringify(ct) !== localStr) {
+        testimonials = ct;
+        localStorage.setItem('ds_testimonials', JSON.stringify(ct));
+        renderTestimonials();
+      }
+    }
+    const cc = await _supaRead('company');
+    if (cc) {
+      const localStr = localStorage.getItem('ds_company');
+      if (JSON.stringify(cc) !== localStr) {
+        company = cc;
+        localStorage.setItem('ds_company', JSON.stringify(cc));
+        if(typeof applyLang==='function') applyLang();
+      }
+    }
+  } catch(e) {}
+}, 15000);
 let products = loadData('products', defaultProducts);
 let testimonials = loadData('testimonials', defaultTestimonials);
 let orders = loadRealOrders();
@@ -2463,19 +2408,21 @@ function initDashboard() {
   // Auto-refresh dari cloud setiap 15 detik
   if (window._ordersInterval) clearInterval(window._ordersInterval);
   window._ordersInterval = setInterval(async () => {
-    const cloudData = await cloudLoad('realOrders');
-    if (cloudData !== null) {
+    try {
+      const cloudData = await _supaRead('realOrders');
+      if (!cloudData || !Array.isArray(cloudData)) return;
       const cloudArr = cloudData.map(o => ({ phone:'', email:'', note:'', ...o }));
       if (JSON.stringify(cloudArr) !== JSON.stringify(orders)) {
+        const prevLen = orders.length;
         orders = cloudArr;
         localStorage.setItem('ds_realOrders', JSON.stringify(cloudArr));
         const activePanel = document.querySelector('.admin-panel.active');
         if (activePanel && activePanel.id === 'panel-orders') renderOrders();
         updateOverviewStats();
-        addActivityLog('🆕 Data diperbarui dari cloud');
+        if (cloudArr.length > prevLen) addActivityLog('🆕 Pesanan baru dari cloud!');
         showSyncStatus('🔄 Data baru dari cloud!', '#1D4ED8');
       }
-    }
+    } catch(e) {}
   }, 15000);
 }
 
@@ -2592,14 +2539,14 @@ function saveCompanyField(key) {
 
 function manualRefreshOrders() {
   showToast('🔄 Memuat dari cloud...');
-  cloudLoad('realOrders').then(cloudData => {
-    if (cloudData !== null) {
+  _supaRead('realOrders').then(cloudData => {
+    if (cloudData && Array.isArray(cloudData)) {
       orders = cloudData.map(o => ({ phone:'', email:'', note:'', ...o }));
       localStorage.setItem('ds_realOrders', JSON.stringify(orders));
     }
     renderOrders();
     showToast('✅ Data diperbarui dari cloud!');
-  });
+  }).catch(() => { renderOrders(); showToast('⚠️ Gagal refresh'); });
 }
 
 function renderOrders(filterStatus='all') {
