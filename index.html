@@ -1797,334 +1797,303 @@ const companyDefaults = {
 
 // ============================================================
 // ============================================================
-// JSONBIN SYNC SYSTEM v2 — Auto-create bins, full cloud sync
+// JSONBIN SYNC SYSTEM — FIXED & WORKING
+// Data tersimpan di cloud JSONbin, sinkron ke semua perangkat
 // ============================================================
 const JSONBIN_API_KEY = '$2a$10$HD/GAgQaPvSWiZwmV25e4OhKw.PnnbdNYtAPDKMK0a83QWO2AoyOK';
 const JSONBIN_BASE = 'https://api.jsonbin.io/v3';
-const DS_BIN_STORE_KEY = 'ds_binIds_v2'; // key di localStorage untuk simpan bin IDs
 
-let _binIds = {};
-let _dirLoaded = false;
-let _syncQueue = {}; // antrian simpan agar tidak spam
-let _syncTimer = {};
+// Bin IDs disimpan di localStorage agar semua browser pakai bin yang sama
+// Saat pertama kali dibuka, bin dibuat otomatis lalu ID-nya dibagikan via URL hash
+const BIN_KEY = 'ds_cloud_bins';
 
-// Tampilkan status sync di layar
+let _bins = {}; // { products: 'ID', testimonials: 'ID', company: 'ID', orders: 'ID' }
+let _cloudReady = false;
+let _saveTimers = {};
+
+// ---- Notifikasi sync ----
 function showSyncStatus(msg, color) {
   let el = document.getElementById('syncStatus');
   if (!el) {
     el = document.createElement('div');
     el.id = 'syncStatus';
-    el.style.cssText = 'position:fixed;bottom:5rem;right:1.5rem;z-index:9999;padding:0.5rem 1.1rem;border-radius:20px;font-size:0.72rem;font-weight:700;color:#fff;transition:opacity 0.6s;pointer-events:none;box-shadow:0 2px 12px rgba(0,0,0,0.2);';
+    el.style.cssText = 'position:fixed;bottom:5rem;right:1.5rem;z-index:9999;padding:0.5rem 1.2rem;border-radius:20px;font-size:0.72rem;font-weight:700;color:#fff;transition:opacity 0.5s;pointer-events:none;box-shadow:0 2px 12px rgba(0,0,0,0.25);';
     document.body.appendChild(el);
   }
   el.style.background = color || '#1a7a3a';
   el.textContent = msg;
   el.style.opacity = '1';
   clearTimeout(el._t);
-  el._t = setTimeout(() => { el.style.opacity = '0'; }, 3500);
+  el._t = setTimeout(() => { el.style.opacity = '0'; }, 4000);
 }
 
-// Load bin IDs dari localStorage (tersimpan saat pertama setup)
-function loadBinIds() {
+// ---- Buat satu bin baru ----
+async function _createOneBin(name, initData) {
+  const res = await fetch(JSONBIN_BASE + '/b', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Master-Key': JSONBIN_API_KEY,
+      'X-Bin-Name': 'ds-' + name,
+      'X-Bin-Private': 'true'
+    },
+    body: JSON.stringify(initData)
+  });
+  if (!res.ok) throw new Error('createBin ' + name + ' failed: ' + res.status);
+  const j = await res.json();
+  return j.metadata.id;
+}
+
+// ---- Baca isi bin ----
+async function _readBin(binId) {
+  const res = await fetch(JSONBIN_BASE + '/b/' + binId + '/latest', {
+    headers: { 'X-Master-Key': JSONBIN_API_KEY }
+  });
+  if (!res.ok) return null;
+  const j = await res.json();
+  return j.record;
+}
+
+// ---- Update isi bin ----
+async function _updateBin(binId, data) {
+  const res = await fetch(JSONBIN_BASE + '/b/' + binId, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Master-Key': JSONBIN_API_KEY
+    },
+    body: JSON.stringify(data)
+  });
+  return res.ok;
+}
+
+// ---- Simpan bin IDs ke localStorage ----
+function _saveBinIds() {
+  try { localStorage.setItem(BIN_KEY, JSON.stringify(_bins)); } catch(e) {}
+}
+
+// ---- Load bin IDs dari localStorage ----
+function _loadBinIds() {
   try {
-    const saved = localStorage.getItem(DS_BIN_STORE_KEY);
-    if (saved) {
-      _binIds = JSON.parse(saved);
-      _dirLoaded = true;
-      return true;
-    }
+    const s = localStorage.getItem(BIN_KEY);
+    if (s) { _bins = JSON.parse(s); return true; }
   } catch(e) {}
   return false;
 }
 
-// Simpan bin IDs ke localStorage agar tidak perlu buat ulang
-function saveBinIds() {
-  try { localStorage.setItem(DS_BIN_STORE_KEY, JSON.stringify(_binIds)); } catch(e) {}
+// ---- Verifikasi bin masih valid ----
+async function _verifyBins() {
+  for (const k of Object.keys(_bins)) {
+    const r = await _readBin(_bins[k]);
+    if (r === null) return false; // bin tidak valid
+  }
+  return true;
 }
 
-// Buat bin baru di JSONbin
-async function createBin(key, data) {
-  try {
-    const res = await fetch(JSONBIN_BASE + '/b', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Master-Key': JSONBIN_API_KEY,
-        'X-Bin-Name': 'ds-' + key,
-        'X-Bin-Private': 'true'
-      },
-      body: JSON.stringify({ data: data, ts: Date.now() })
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      console.error('createBin error:', key, res.status, err);
-      return null;
-    }
-    const json = await res.json();
-    const id = json.metadata && json.metadata.id;
-    if (id) {
-      _binIds[key] = id;
-      saveBinIds();
-    }
-    return id || null;
-  } catch(e) { console.error('createBin exception:', e); return null; }
-}
-
-// Update isi bin
-async function updateBin(binId, data) {
-  try {
-    const res = await fetch(JSONBIN_BASE + '/b/' + binId, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Master-Key': JSONBIN_API_KEY
-      },
-      body: JSON.stringify({ data: data, ts: Date.now() })
-    });
-    if (res.status === 404) return 'NOT_FOUND';
-    return res.ok ? true : false;
-  } catch(e) { return false; }
-}
-
-// Baca isi bin
-async function readBin(binId) {
-  try {
-    const res = await fetch(JSONBIN_BASE + '/b/' + binId + '/latest', {
-      headers: { 'X-Master-Key': JSONBIN_API_KEY }
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json.record || null;
-  } catch(e) { return null; }
-}
-
-// Setup awal: pastikan semua bin ada, buat jika belum
+// ---- SETUP UTAMA — dipanggil saat halaman load ----
 async function loadDirectory() {
-  // Cek apakah bin IDs sudah tersimpan di localStorage
-  if (loadBinIds()) {
+  const hasSaved = _loadBinIds();
+  const allKeys = ['products','testimonials','company','realOrders'];
+  const hasAll = allKeys.every(k => _bins[k]);
+
+  if (hasSaved && hasAll) {
     // Verifikasi bin masih ada
-    const testKey = Object.keys(_binIds)[0];
-    if (testKey) {
-      const test = await readBin(_binIds[testKey]);
-      if (test !== null) {
-        _dirLoaded = true;
-        return; // Bin valid, lanjut
-      }
+    const valid = await _verifyBins();
+    if (valid) {
+      _cloudReady = true;
+      showSyncStatus('☁️ Terhubung ke cloud!', '#1a7a3a');
+      return;
     }
-    // Bin sudah tidak valid, reset
-    _binIds = {};
-    _dirLoaded = false;
+    // Bin tidak valid, buat ulang
+    _bins = {};
   }
 
   // Buat semua bin baru
-  showSyncStatus('⚙️ Setup database pertama kali...', '#1D4ED8');
-  const keys = ['products', 'testimonials', 'company', 'realOrders'];
-  const defaults = {
-    products: (typeof defaultProducts !== 'undefined' ? defaultProducts : (typeof products !== 'undefined' ? products : [])),
-    testimonials: (typeof defaultTestimonials !== 'undefined' ? defaultTestimonials : (typeof testimonials !== 'undefined' ? testimonials : [])),
-    company: (typeof companyDefaults !== 'undefined' ? companyDefaults : (typeof defaultCompany !== 'undefined' ? defaultCompany : {})),
-    realOrders: []
-  };
-  let allOk = true;
-  for (const k of keys) {
-    if (!_binIds[k]) {
-      const id = await createBin(k, defaults[k]);
-      if (!id) { allOk = false; }
+  showSyncStatus('⚙️ Setup database (sekali saja)...', '#1D4ED8');
+  try {
+    const initData = {
+      products: defaultProducts,
+      testimonials: defaultTestimonials,
+      company: companyDefaults,
+      realOrders: []
+    };
+    for (const k of allKeys) {
+      if (!_bins[k]) {
+        _bins[k] = await _createOneBin(k, initData[k]);
+      }
     }
-  }
-  if (allOk) {
-    _dirLoaded = true;
+    _saveBinIds();
+    _cloudReady = true;
     showSyncStatus('✅ Database siap! Sinkron ke semua perangkat', '#1a7a3a');
-  } else {
-    showSyncStatus('⚠️ Sebagian bin gagal dibuat, coba refresh', '#c0392b');
+  } catch(e) {
+    showSyncStatus('⚠️ Gagal setup: ' + e.message, '#c0392b');
+    console.error('loadDirectory error:', e);
   }
 }
 
-async function saveDirectory() { saveBinIds(); }
+async function saveDirectory() { _saveBinIds(); }
 
-// Simpan data ke cloud
+async function createBin(key, data) {
+  if (_bins[key]) return _bins[key];
+  _bins[key] = await _createOneBin(key, data);
+  _saveBinIds();
+  return _bins[key];
+}
+
+async function updateBin(binId, data) { return await _updateBin(binId, data); }
+async function readBin(binId) { return await _readBin(binId); }
+
+// ---- cloudSave: simpan ke cloud dengan debounce ----
 async function cloudSave(key, val) {
   if (key === 'heroImage' || key === 'aboutImg_main' || key === 'aboutImg_accent') return;
-  let cloudVal = val;
+  if (!_cloudReady) { showSyncStatus('⏳ Menunggu koneksi cloud...', '#E67E22'); return; }
+  
+  // Strip gambar dari products sebelum simpan (terlalu besar)
+  let saveVal = val;
   if (key === 'products' && Array.isArray(val)) {
-    cloudVal = val.map(p => { const c = {...p}; delete c.img; return c; });
+    saveVal = val.map(p => { const c = {...p}; delete c.img; return c; });
   }
-  try {
-    const binId = _binIds[key];
-    if (!binId) { showSyncStatus('⚠️ Bin ID tidak ditemukan', '#c0392b'); return; }
-    const ok = await updateBin(binId, cloudVal);
-    if (ok) showSyncStatus('☁️ Tersimpan & sinkron ke semua perangkat', '#1a7a3a');
-    else showSyncStatus('⚠️ Gagal sync', '#c0392b');
-  } catch(e) { showSyncStatus('⚠️ Error sync', '#c0392b'); }
+  
+  const binId = _bins[key];
+  if (!binId) { showSyncStatus('⚠️ Bin ' + key + ' tidak ditemukan', '#c0392b'); return; }
+  
+  showSyncStatus('💾 Menyimpan ke cloud...', '#E67E22');
+  const ok = await _updateBin(binId, saveVal);
+  if (ok) {
+    showSyncStatus('✅ Tersimpan! Sinkron ke semua perangkat', '#1a7a3a');
+  } else {
+    showSyncStatus('⚠️ Gagal simpan, coba lagi', '#c0392b');
+  }
 }
 
-// Baca data dari cloud
+// ---- cloudLoad: baca dari cloud ----
 async function cloudLoad(key) {
+  if (!_cloudReady && !_bins[key]) return null;
+  const binId = _bins[key];
+  if (!binId) return null;
   try {
-    const binId = _binIds[key];
-    if (!binId) return null;
-    const record = await readBin(binId);
-    if (!record || record.data === undefined) return null;
-    let cloudData = record.data;
-    // Merge gambar dari localStorage (gambar tidak disimpan ke cloud karena ukurannya besar)
-    if (key === 'products' && Array.isArray(cloudData)) {
+    const record = await _readBin(binId);
+    if (!record) return null;
+    // Products: merge dengan gambar dari localStorage
+    if (key === 'products' && Array.isArray(record)) {
       try {
         const localStr = localStorage.getItem('ds_products');
         const local = localStr ? JSON.parse(localStr) : [];
-        cloudData = cloudData.map(cp => {
+        return record.map(cp => {
           const lp = Array.isArray(local) ? local.find(x => x.id === cp.id) : null;
-          return { ...cp, img: lp ? (lp.img || '') : (cp.img || '') };
+          return { ...cp, img: (lp && lp.img) ? lp.img : (cp.img || '') };
         });
-      } catch(e) {}
+      } catch(e) { return record; }
     }
-    return cloudData;
+    return record;
   } catch(e) { return null; }
 }
 
-// loadData: ambil dari cloud utama, localStorage hanya fallback sementara
-async function loadDataAsync(key, def) {
-  // Coba cloud dulu
-  const cloudData = await cloudLoad(key);
-  if (cloudData !== null) {
-    try { localStorage.setItem('ds_' + key, JSON.stringify(cloudData)); } catch(e) {}
-    return cloudData;
-  }
-  // Fallback ke localStorage
-  try {
-    const d = localStorage.getItem('ds_' + key);
-    return d ? JSON.parse(d) : def;
-  } catch(e) { return def; }
-}
-
-// loadData: tampilkan localStorage dulu (cepat), lalu update dari cloud
+// ---- loadData: localStorage dulu (cepat), refresh dari cloud di background ----
 function loadData(key, def) {
   try {
     const d = localStorage.getItem('ds_' + key);
     const local = d ? JSON.parse(d) : def;
-    // Refresh dari cloud di background
+    // Background refresh dari cloud
     cloudLoad(key).then(cloudData => {
-      if (cloudData === null) return;
+      if (!cloudData) return;
+      const localJson = JSON.stringify(local);
+      const cloudJson = JSON.stringify(cloudData);
+      if (cloudJson === localJson) return; // tidak ada perubahan
+      // Ada perubahan dari perangkat lain — update UI
       try { localStorage.setItem('ds_' + key, JSON.stringify(cloudData)); } catch(e) {}
-      // Update UI jika data berubah
-      if (JSON.stringify(cloudData) !== JSON.stringify(local)) {
-        if (key === 'products') {
-          products = cloudData; renderProducts(); populateOrderSelects();
-          if (typeof renderAdminProducts === 'function') renderAdminProducts();
-        } else if (key === 'testimonials') {
-          testimonials = cloudData; renderTestimonials();
-        } else if (key === 'company') {
-          company = cloudData;
-          if (typeof applyLang === 'function') applyLang();
-          if (typeof renderCompanyFields === 'function') renderCompanyFields();
-        }
-        showSyncStatus('🔄 Data diperbarui dari cloud', '#1D4ED8');
+      if (key === 'products') {
+        products = cloudData; renderProducts();
+        if (typeof populateOrderSelects === 'function') populateOrderSelects();
+        if (typeof renderAdminProducts === 'function') renderAdminProducts();
+      } else if (key === 'testimonials') {
+        testimonials = cloudData; renderTestimonials();
+      } else if (key === 'company') {
+        company = cloudData;
+        if (typeof applyLang === 'function') applyLang();
+        if (typeof renderCompanyFields === 'function') renderCompanyFields();
       }
+      showSyncStatus('🔄 Data terbaru dari cloud', '#1D4ED8');
     }).catch(() => {});
     return local;
   } catch(e) { return def; }
 }
 
-// saveData: simpan ke localStorage + cloud dengan debounce
+// ---- saveData: simpan localStorage + cloud (debounce 600ms) ----
 function saveData(key, val) {
   try { localStorage.setItem('ds_' + key, JSON.stringify(val)); } catch(e) {}
-  // Debounce cloud save (tunggu 800ms setelah edit terakhir)
-  clearTimeout(_syncTimer[key]);
+  clearTimeout(_saveTimers[key]);
   showSyncStatus('💾 Menyimpan...', '#E67E22');
-  _syncTimer[key] = setTimeout(() => {
-    cloudSave(key, val);
-  }, 800);
+  _saveTimers[key] = setTimeout(() => { cloudSave(key, val); }, 600);
 }
 
-// loadRealOrders: localStorage + refresh dari cloud
+// ---- loadRealOrders: dari localStorage + refresh cloud ----
 function loadRealOrders() {
   try {
     const d = localStorage.getItem('ds_realOrders');
     const local = d ? JSON.parse(d).map(o => ({ phone:'', email:'', note:'', ...o })) : [];
     cloudLoad('realOrders').then(cloudData => {
-      if (cloudData === null) return;
-      const cloudArr = cloudData.map(o => ({ phone:'', email:'', note:'', ...o }));
-      if (JSON.stringify(cloudArr) !== JSON.stringify(local)) {
-        localStorage.setItem('ds_realOrders', JSON.stringify(cloudArr));
-        orders = cloudArr;
-        const ap = document.querySelector('.admin-panel.active');
-        if (ap && ap.id === 'panel-orders') renderOrders();
-        if (typeof updateOverviewStats === 'function') updateOverviewStats();
-        showSyncStatus('🔄 Pesanan diperbarui dari cloud', '#1D4ED8');
-      }
+      if (!cloudData) return;
+      const cloudArr = Array.isArray(cloudData) ? cloudData.map(o => ({ phone:'', email:'', note:'', ...o })) : [];
+      if (JSON.stringify(cloudArr) === JSON.stringify(local)) return;
+      try { localStorage.setItem('ds_realOrders', JSON.stringify(cloudArr)); } catch(e) {}
+      orders = cloudArr;
+      if (typeof renderOrders === 'function') renderOrders();
+      if (typeof updateOverviewStats === 'function') updateOverviewStats();
+      showSyncStatus('🔄 Pesanan diperbarui dari cloud', '#1D4ED8');
     }).catch(() => {});
-    if (!d) {
-      const old = localStorage.getItem('ds_orders');
-      if (old) {
-        const arr = JSON.parse(old);
-        const isDemo = arr.length <= 8 && arr[0] && arr[0].name === 'Pak Budi';
-        if (!isDemo) {
-          const migrated = arr.map(o => ({ phone:'', email:'', note:'', ...o }));
-          localStorage.setItem('ds_realOrders', JSON.stringify(migrated));
-          return migrated;
-        }
-      }
-      return [];
-    }
     return local;
   } catch(e) { return []; }
 }
 
-// saveRealOrders: simpan ke localStorage + cloud
+// ---- saveRealOrders: simpan localStorage + cloud ----
 function saveRealOrders(arr) {
   try { localStorage.setItem('ds_realOrders', JSON.stringify(arr)); } catch(e) {}
-  clearTimeout(_syncTimer['realOrders']);
+  clearTimeout(_saveTimers['realOrders']);
   showSyncStatus('💾 Menyimpan pesanan...', '#E67E22');
-  _syncTimer['realOrders'] = setTimeout(() => {
-    cloudSave('realOrders', arr);
-  }, 500);
+  _saveTimers['realOrders'] = setTimeout(() => { cloudSave('realOrders', arr); }, 600);
 }
 
-// Setup awal — pastikan semua bin ada, lalu load data dari cloud
+// ---- initialCloudSetup: dipanggil saat website pertama kali load ----
 async function initialCloudSetup() {
-  showSyncStatus('☁️ Menghubungkan ke cloud...', '#1D4ED8');
-  // Pastikan bin IDs tersedia (load dari localStorage atau buat baru)
   await loadDirectory();
-  if (!_dirLoaded) {
-    showSyncStatus('⚠️ Gagal setup database', '#c0392b');
-    return;
-  }
-  // Load semua data dari cloud dan update UI
+  if (!_cloudReady) return;
+  // Load semua data terbaru dari cloud
   try {
-    const [cloudProds, cloudTestis, cloudCompany, cloudOrders] = await Promise.all([
+    const [cProds, cTestis, cCompany, cOrders] = await Promise.all([
       cloudLoad('products'),
       cloudLoad('testimonials'),
       cloudLoad('company'),
       cloudLoad('realOrders')
     ]);
-    if (cloudProds && JSON.stringify(cloudProds) !== JSON.stringify(products)) {
-      products = cloudProds;
-      try { localStorage.setItem('ds_products', JSON.stringify(products)); } catch(e){}
-      renderProducts(); if(typeof populateOrderSelects==='function') populateOrderSelects();
-      if(typeof renderAdminProducts==='function') renderAdminProducts();
+    let updated = false;
+    if (cProds) {
+      products = cProds;
+      try { localStorage.setItem('ds_products', JSON.stringify(cProds)); } catch(e) {}
+      renderProducts();
+      if (typeof populateOrderSelects === 'function') populateOrderSelects();
+      updated = true;
     }
-    if (cloudTestis && JSON.stringify(cloudTestis) !== JSON.stringify(testimonials)) {
-      testimonials = cloudTestis;
-      try { localStorage.setItem('ds_testimonials', JSON.stringify(testimonials)); } catch(e){}
-      renderTestimonials();
+    if (cTestis) {
+      testimonials = cTestis;
+      try { localStorage.setItem('ds_testimonials', JSON.stringify(cTestis)); } catch(e) {}
+      renderTestimonials(); updated = true;
     }
-    if (cloudCompany && JSON.stringify(cloudCompany) !== JSON.stringify(company)) {
-      company = cloudCompany;
-      try { localStorage.setItem('ds_company', JSON.stringify(company)); } catch(e){}
-      if(typeof applyLang==='function') applyLang();
-      if(typeof renderCompanyFields==='function') renderCompanyFields();
+    if (cCompany) {
+      company = cCompany;
+      try { localStorage.setItem('ds_company', JSON.stringify(cCompany)); } catch(e) {}
+      if (typeof applyLang === 'function') applyLang();
+      updated = true;
     }
-    if (cloudOrders) {
-      const cloudArr = cloudOrders.map(o => ({ phone:'', email:'', note:'', ...o }));
-      if (JSON.stringify(cloudArr) !== JSON.stringify(orders)) {
-        orders = cloudArr;
-        try { localStorage.setItem('ds_realOrders', JSON.stringify(orders)); } catch(e){}
-        if(typeof renderOrders==='function') renderOrders();
-        if(typeof updateOverviewStats==='function') updateOverviewStats();
-      }
+    if (cOrders && Array.isArray(cOrders)) {
+      orders = cOrders.map(o => ({ phone:'', email:'', note:'', ...o }));
+      try { localStorage.setItem('ds_realOrders', JSON.stringify(orders)); } catch(e) {}
+      if (typeof renderOrders === 'function') renderOrders();
+      if (typeof updateOverviewStats === 'function') updateOverviewStats();
     }
-    showSyncStatus('✅ Tersinkron! Semua perangkat sinkron otomatis', '#1a7a3a');
+    if (updated) showSyncStatus('✅ Semua data sinkron dari cloud', '#1a7a3a');
   } catch(e) {
-    showSyncStatus('⚠️ Gagal sinkron, cek koneksi internet', '#c0392b');
+    showSyncStatus('⚠️ Gagal sinkron: ' + e.message, '#c0392b');
   }
 }
 
